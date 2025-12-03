@@ -10,10 +10,10 @@ use crate::net_device;
 #[derive(Copy, Clone)]
 #[repr(C)]
 pub struct DmaDesc {
-    pub txrx_status: u32,
-    pub dmamac_cntl: u32,
-    pub dmamac_addr: u32,
-    pub dmamac_next: u32,
+    pub status: u32,
+    pub length: u32,
+    pub buffer1: u32,
+    pub buffer2: u32,
 }
 
 pub fn eth_mac_read_reg(base: u64, offset: u32) -> u32 {
@@ -291,38 +291,27 @@ pub fn eth_setup_tx_desc_queue(gmacdev: &mut net_device, desc_num: u32) {
     let mut desc: *mut DmaDesc = null_mut();
     let mut dma_addr: u32 = 0;
     let mut buffer: u64 = 0;
-    let mut first_desc: *mut DmaDesc = null_mut();
 
     desc = unsafe { eth_malloc_align((size_of::<DmaDesc>() * (desc_num as usize)) as u64, 16) }
         as *mut DmaDesc;
-    first_desc = desc;
     dma_addr = unsafe { eth_virt_to_phys(desc as u64) };
 
-    gmacdev.tx_currdescnum = 0;
+    gmacdev.tx_next = 0;
+    gmacdev.tx_busy = 0;
 
     eth_mac_write_reg(gmacdev.dma_base, DmaTxBaseAddr, dma_addr);
 
     for i in 0..desc_num {
-        buffer = unsafe { eth_malloc_align(2048, 64) };
-        dma_addr = unsafe { eth_virt_to_phys(buffer) };
+        buffer = unsafe { eth_malloc_align(2048, 16) };
         gmacdev.tx_desc[i as usize] = desc;
         gmacdev.tx_buffer[i as usize] = buffer;
 
+        let is_last = i == desc_num - 1;
         unsafe {
-            (*desc).txrx_status = 0;
-            (*desc).dmamac_addr = dma_addr;
-            (*desc).dmamac_next = unsafe {eth_virt_to_phys(desc.offset(1) as u64)};
-            (*desc).txrx_status &= !((1 << 30) | (1 << 29) | (1 << 28) | (1 << 27)
-                                     | (3 << 22) | (1 << 21) | (1 << 26));
-            (*desc).txrx_status |= (1 << 20);
-            (*desc).dmamac_cntl = 0;
-            (*desc).txrx_status &= !((0x1FFFF << 0) | (1 << 31));
-            // unsafe {eth_printf(b"tx desc dmamac status: %x, %lx\n\0" as *const u8, (*desc).txrx_status, (*desc).dmamac_addr);}
-            // unsafe {eth_printf(b"tx desc dmamac   addr: %lx\n\0" as *const u8, desc);}
-            if i == (desc_num-1) {
-                (*desc).dmamac_next = unsafe { eth_virt_to_phys(first_desc as u64) };
-                // unsafe {eth_printf(b"tx desc dmamac_next: %lx, %lx <-->\n\n\0" as *const u8, desc as u64, (*desc).dmamac_next);}
-            }
+            (*desc).status = if is_last { TxDescEndOfRing } else { 0 };
+            (*desc).length = 0;
+            (*desc).buffer1 = 0;
+            (*desc).buffer2 = 0;
             desc = desc.offset(1);
         }
     }
@@ -332,66 +321,59 @@ pub fn eth_setup_rx_desc_queue(gmacdev: &mut net_device, desc_num: u32) {
     let mut desc: *mut DmaDesc = null_mut();
     let mut dma_addr: u32 = 0;
     let mut buffer: u64 = 0;
-    let mut first_desc: *mut DmaDesc = null_mut();
 
-    desc = unsafe { eth_malloc_align((size_of::<DmaDesc>() * (desc_num as usize)) as u64, 64) }
+    desc = unsafe { eth_malloc_align((size_of::<DmaDesc>() * (desc_num as usize)) as u64, 16) }
         as *mut DmaDesc;
-    first_desc = desc;
-
     dma_addr = unsafe { eth_virt_to_phys(desc as u64) };
 
-    gmacdev.rx_currdescnum = 0;
+    gmacdev.rx_busy = 0;
 
     eth_mac_write_reg(gmacdev.dma_base, DmaRxBaseAddr, dma_addr);
 
     for i in 0..desc_num {
-        buffer = unsafe { eth_malloc_align(2048, 64) };
+        buffer = unsafe { eth_malloc_align(2048, 16) };
         dma_addr = unsafe { eth_virt_to_phys(buffer) };
         gmacdev.rx_desc[i as usize] = desc;
         gmacdev.rx_buffer[i as usize] = buffer;
 
+        let is_last = i == desc_num - 1;
         unsafe {
-            (*desc).dmamac_addr = dma_addr;
-            (*desc).dmamac_next = unsafe {eth_virt_to_phys(desc.offset(1) as u64)};
-            (*desc).dmamac_cntl = (1600 & (0x1FFF << 0)) | (1 << 14);
-            (*desc).txrx_status = (1 << 31);
-            // unsafe {eth_printf(b"rx desc dmamac status: %x, %lx\n\0" as *const u8, (*desc).txrx_status, (*desc).dmamac_addr);}
-            // unsafe {eth_printf(b"rx desc dmamac   addr: %lx\n\0" as *const u8, desc);}
-            if i == (desc_num-1) {
-                (*desc).dmamac_next = unsafe { eth_virt_to_phys(first_desc as u64) };
-                // unsafe {eth_printf(b"rx desc dmamac_next: %lx, %lx <-->\n\n\0" as *const u8, desc as u64, (*desc).dmamac_next);}
-            }
+            (*desc).status = DescOwnByDma;
+            (*desc).length = if is_last { RxDescEndOfRing } else { 0 };
+            (*desc).length |= ((2048 << DescSize1Shift) & DescSize1Mask) as u32;
+            (*desc).buffer1 = dma_addr;
+            (*desc).buffer2 = 0;
             desc = desc.offset(1);
         }
     }
 }
 
 pub fn eth_get_desc_owner(desc: &DmaDesc) -> bool {
-    return (desc.txrx_status & DescOwnByDma) == DescOwnByDma;
+    return (desc.status & DescOwnByDma) == DescOwnByDma;
 }
 
 pub fn eth_get_rx_length(desc: &DmaDesc) -> u32 {
-    return (desc.txrx_status & DescFrameLengthMask) >> DescFrameLengthShift;
+    return (desc.status & DescFrameLengthMask) >> DescFrameLengthShift;
 }
 
 pub fn eth_is_tx_desc_valid(desc: &DmaDesc) -> bool {
-    return (desc.txrx_status & DescError) == 0;
+    return (desc.status & DescError) == 0;
 }
 
 pub fn eth_is_desc_empty(desc: &DmaDesc) -> bool {
-    return (desc.dmamac_cntl & DescSize1Mask == 0) && (desc.dmamac_cntl & DescSize2Mask == 0);
+    return (desc.length & DescSize1Mask == 0) && (desc.length & DescSize2Mask == 0);
 }
 
 pub fn eth_is_rx_desc_valid(desc: &DmaDesc) -> bool {
-    return (desc.txrx_status & DescError == 0)
-        && (desc.txrx_status & DescRxFirst == DescRxFirst)
-        && (desc.txrx_status & DescRxLast == DescRxLast);
+    return (desc.status & DescError == 0)
+        && (desc.status & DescRxFirst == DescRxFirst)
+        && (desc.status & DescRxLast == DescRxLast);
 }
 
 pub fn eth_is_last_rx_desc(desc: &DmaDesc) -> bool {
-    return desc.dmamac_cntl & RxDescEndOfRing == RxDescEndOfRing;
+    return desc.length & RxDescEndOfRing == RxDescEndOfRing;
 }
 
 pub fn eth_is_last_tx_desc(desc: &DmaDesc) -> bool {
-    return desc.txrx_status & TxDescEndOfRing == TxDescEndOfRing;
+    return desc.status & TxDescEndOfRing == TxDescEndOfRing;
 }

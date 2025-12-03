@@ -34,8 +34,6 @@ pub struct net_device {
     pub advertising: u32,
     pub link_status: u32,
     pub duplex_mode: u32,
-    pub tx_currdescnum: u32,
-    pub rx_currdescnum: u32,
     pub speed: u32,
     pub rx_buffer_len: u64,
     pub tx_buffer_len: u64,
@@ -129,7 +127,7 @@ pub fn eth_handle_tx_over(gmacdev: &mut net_device) {
         }
 
         if eth_is_tx_desc_valid(&txdesc) {
-            let mut length: u32 = (txdesc.dmamac_cntl & DescSize1Mask) >> DescSize1Shift;
+            let mut length: u32 = (txdesc.length & DescSize1Mask) >> DescSize1Shift;
             gmacdev.tx_bytes += length as u64;
             gmacdev.tx_packets += 1;
         } else {
@@ -137,10 +135,10 @@ pub fn eth_handle_tx_over(gmacdev: &mut net_device) {
         }
 
         let is_last: bool = eth_is_last_tx_desc(&txdesc);
-        txdesc.txrx_status = if is_last { TxDescEndOfRing } else { 0 };
-        txdesc.dmamac_cntl = 0;
-        txdesc.dmamac_addr = 0;
-        txdesc.dmamac_next = 0;
+        txdesc.status = if is_last { TxDescEndOfRing } else { 0 };
+        txdesc.length = 0;
+        txdesc.buffer1 = 0;
+        txdesc.buffer2 = 0;
         unsafe {
             gmacdev.tx_desc[desc_idx as usize].write(txdesc);
         }
@@ -156,13 +154,11 @@ pub fn eth_tx(gmacdev: &mut net_device, pbuf: Vec<u8>) -> i32 {
     let mut buffer: u64 = 0;
     let mut length: u32 = 0;
     let mut dma_addr: u32 = 0;
-    let mut desc_idx: u32 = gmacdev.tx_currdescnum;
+    let mut desc_idx: u32 = gmacdev.tx_next;
     let mut txdesc: DmaDesc = unsafe { gmacdev.tx_desc[desc_idx as usize].read() } as DmaDesc;
+    let mut is_last: bool = eth_is_last_tx_desc(&txdesc);
 
-    // unsafe {eth_printf(b"gmac send packet: desc_idx: %lx, addr: %lx\n\0" as *const u8, desc_idx, gmacdev.tx_desc[desc_idx as usize]);};
-    // unsafe {eth_printf(b"gmac send packet:   status: %lx, addr: %lx\n\0" as *const u8, txdesc.txrx_status, txdesc.dmamac_addr);};
-
-    if (txdesc.txrx_status & (1 << 31)) != 0 {
+    if eth_get_desc_owner(&txdesc) {
         return -1;
     }
 
@@ -176,29 +172,25 @@ pub fn eth_tx(gmacdev: &mut net_device, pbuf: Vec<u8>) -> i32 {
 
     dma_addr = unsafe { eth_virt_to_phys(buffer) };
 
-    txdesc.txrx_status |= (1 << 28) | (1 << 29);
-    txdesc.dmamac_cntl = (txdesc.dmamac_cntl & !(0x1FFF << 0)) |
-                         ((length << 0) & (0x1FFF << 0));
-    txdesc.txrx_status &= (!(0x1FFFF << 0));
-    txdesc.txrx_status |= (1 << 31);
+    txdesc.status |= DescOwnByDma | DescTxIntEnable | DescTxLast | DescTxFirst;
+    txdesc.length = length << DescSize1Shift & DescSize1Mask;
+    txdesc.buffer1 = dma_addr;
+    txdesc.buffer2 = 0;
     unsafe {
         gmacdev.tx_desc[desc_idx as usize].write(txdesc);
     }
-    desc_idx += 1;
-    if desc_idx >= 16 {
-        desc_idx = 0;
-    }
-    gmacdev.tx_currdescnum = desc_idx;
+
+    gmacdev.tx_next = if is_last { 0 } else { desc_idx + 1 };
 
     unsafe { eth_sync_dcache() };
 
-    eth_mac_write_reg(gmacdev.dma_base, DmaTxPollDemand, (0xFFFFFFFF));
-    // eth_gmac_resume_dma_tx(gmacdev);
+    eth_gmac_resume_dma_tx(gmacdev);
 
-    // unsafe {eth_printf(b"gmac send packet: %lx, len: %d\n\0" as *const u8, buffer, length);};
+    //unsafe {eth_printf(b"gmac send packet: %lx, len: %d\n\0" as *const u8, buffer, length);};
 
     // eth_mdelay(50);
-    eth_mdelay(10);
+    eth_mdelay(1);
+
     return 0;
 }
 
@@ -207,43 +199,52 @@ pub fn eth_tx(gmacdev: &mut net_device, pbuf: Vec<u8>) -> i32 {
 pub fn eth_rx(gmacdev: &mut net_device) -> Option<Vec<Vec<u8>>> {
     let mut recv_packets = Vec::new();
     let mut rmbuf: u64 = 0;
-    let mut length: u32 = 0;
-    let mut desc_idx: u32 = gmacdev.rx_currdescnum;
+    let mut rlength: u32 = 0;
+    let mut desc_idx: u32 = gmacdev.rx_busy;
     let mut rxdesc: DmaDesc = unsafe { gmacdev.rx_desc[desc_idx as usize].read() } as DmaDesc;
+    let mut is_last: bool = eth_is_last_rx_desc(&rxdesc);
 
-    // unsafe {eth_printf(b"gmac recv packet: desc_idx: %lx, addr: %lx\n\0" as *const u8, desc_idx, gmacdev.rx_desc[desc_idx as usize]);};
-    // unsafe {eth_printf(b"gmac recv packet:   status: %lx, addr: %lx\n\0" as *const u8, rxdesc.txrx_status, rxdesc.dmamac_addr);};
-
-    if rxdesc.txrx_status & (1 << 31) != 0 {
+    if eth_is_desc_empty(&rxdesc) || eth_get_desc_owner(&rxdesc) {
+        eth_dma_enable_interrupt(gmacdev, DmaIntEnable);
+        // eth_dma_enable_interrupt(gmacdev, DmaIntDisable);
         return None;
     }
 
     // let mut pbuf: u64 = 0;
-    let mut dma_addr = rxdesc.dmamac_addr;
+    let mut dma_addr = rxdesc.buffer1;
 
-    length = (rxdesc.txrx_status & (0x3FFF << 16)) >> (16);
+    if eth_is_rx_desc_valid(&rxdesc) {
+        let mut length: u32 = eth_get_rx_length(&rxdesc);
+        let mut buffer: u64 = unsafe { eth_phys_to_virt(dma_addr) };
 
-    let mut buffer: u64 = unsafe { eth_phys_to_virt(dma_addr)};
+        unsafe {
+            eth_sync_dcache();
+        }
 
-    let mbuf = unsafe { from_raw_parts_mut(buffer as *mut u8, length as usize)};
-    recv_packets.push(mbuf.to_vec());
+        // pbuf = unsafe { eth_handle_rx_buffer(buffer, length) };
+        // pbuf = buffer;
+        let mbuf = unsafe { from_raw_parts_mut(buffer as *mut u8, length as usize) };
+        rlength = length;
+        rmbuf = mbuf.as_ptr() as u64;
+        recv_packets.push(mbuf.to_vec());
+        gmacdev.rx_buffer_len = length as u64;
+        gmacdev.rx_bytes += length as u64;
+        gmacdev.rx_packets += 1;
+    } else {
+        gmacdev.rx_errors += 1;
+    }
 
-    rxdesc.txrx_status |= (1 << 31);
-
+    rxdesc.status = DescOwnByDma;
+    rxdesc.length = if is_last { RxDescEndOfRing } else { 0 };
+    rxdesc.length |= (2048) << DescSize1Shift & DescSize1Mask;
+    rxdesc.buffer1 = dma_addr;
+    rxdesc.buffer2 = 0;
     unsafe {
         gmacdev.rx_desc[desc_idx as usize].write(rxdesc);
     }
 
-    unsafe {
-        eth_sync_dcache();
-    }
-
-    desc_idx += 1;
-    if desc_idx >= 16 {
-        desc_idx = 0;
-    }
-    gmacdev.rx_currdescnum = desc_idx;
-
+    gmacdev.rx_busy = if is_last { 0 } else { desc_idx + 1 };
+    // return pbuf;
     // unsafe {eth_printf(b"gmac receive packet: %lx, len: %d\n\0" as *const u8, rmbuf, rlength);};
 
     if recv_packets.len() > 0 {
@@ -330,46 +331,32 @@ pub fn eth_init(gmacdev: &mut net_device) -> i32 {
     gmacdev.phy_base = 0;
     gmacdev.version = eth_mac_read_reg(gmacdev.mac_base, GmacVersion);
 
-    let mut set_data:u32 = 0;
-
     unsafe {eth_printf(b"gmac eth_init...\n\0" as *const u8)};
 
     eth_dma_reset(gmacdev);
-
-    // set mac hardware address
     eth_mac_set_addr(gmacdev);
     eth_phy_init(gmacdev);
 
-    eth_setup_rx_desc_queue(gmacdev, 16);
-    eth_setup_tx_desc_queue(gmacdev, 16);
+    eth_setup_rx_desc_queue(gmacdev, 128);
+    eth_setup_tx_desc_queue(gmacdev, 128);
 
-    eth_mac_write_reg(gmacdev.dma_base, DmaBusMode, ((1 << 16) | (3 << 14) | (8 << 8)));
-
-    set_data = eth_mac_read_reg(gmacdev.dma_base, DmaControl);
-    set_data |= ((1 << 20) | (1 << 13));
-    eth_mac_write_reg(gmacdev.dma_base, DmaControl, set_data);
-
-    set_data = eth_mac_read_reg(gmacdev.dma_base, DmaControl);
-    set_data |= ((1 << 1) | (1 << 21) | (8 << 8));
-    eth_mac_write_reg(gmacdev.dma_base, DmaControl, set_data);
-
-    // phy_startup; TODO:
-
-    // dw_adjust_link
-    set_data = eth_mac_read_reg(gmacdev.mac_base, GmacConfig) | (1 << 21) | (1 << 13);
-    set_data &= !(1 << 15);
-    set_data |= (1 << 11);
-    eth_mac_write_reg(gmacdev.mac_base, GmacConfig, set_data);
-
-    // eth_dma_reg_init(gmacdev);
-    // eth_gmac_reg_init(gmacdev);
-
-    // designware_eth_enable
-    set_data = eth_mac_read_reg(gmacdev.mac_base, GmacConfig);
-    set_data |= ((1 << 2) | (1 << 3));
-    eth_mac_write_reg(gmacdev.mac_base, GmacConfig, set_data);
+    eth_dma_reg_init(gmacdev);
+    eth_gmac_reg_init(gmacdev);
 
     unsafe { eth_sync_dcache() };
+
+    eth_gmac_disable_mmc_irq(gmacdev);
+    eth_dma_clear_curr_irq(gmacdev);
+
+    eth_dma_enable_interrupt(gmacdev, DmaIntEnable);
+    // eth_dma_enable_interrupt(gmacdev, DmaIntDisable);
+
+    eth_gmac_enable_rx(gmacdev);
+    eth_gmac_enable_tx(gmacdev);
+    eth_dma_enable_rx(gmacdev);
+    eth_dma_enable_tx(gmacdev);
+
+    unsafe { eth_isr_install() };
 
     eth_phy_rgsmii_check(gmacdev);
 
