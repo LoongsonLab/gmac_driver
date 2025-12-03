@@ -159,6 +159,9 @@ pub fn eth_tx(gmacdev: &mut net_device, pbuf: Vec<u8>) -> i32 {
     let mut desc_idx: u32 = gmacdev.tx_currdescnum;
     let mut txdesc: DmaDesc = unsafe { gmacdev.tx_desc[desc_idx as usize].read() } as DmaDesc;
 
+    // unsafe {eth_printf(b"gmac send packet: desc_idx: %lx, addr: %lx\n\0" as *const u8, desc_idx, gmacdev.tx_desc[desc_idx as usize]);};
+    // unsafe {eth_printf(b"gmac send packet:   status: %lx, addr: %lx\n\0" as *const u8, txdesc.txrx_status, txdesc.dmamac_addr);};
+
     if (txdesc.txrx_status & (1 << 31)) != 0 {
         return -1;
     }
@@ -192,10 +195,10 @@ pub fn eth_tx(gmacdev: &mut net_device, pbuf: Vec<u8>) -> i32 {
     eth_mac_write_reg(gmacdev.dma_base, DmaTxPollDemand, (0xFFFFFFFF));
     // eth_gmac_resume_dma_tx(gmacdev);
 
-    //unsafe {eth_printf(b"gmac send packet: %lx, len: %d\n\0" as *const u8, buffer, length);};
+    // unsafe {eth_printf(b"gmac send packet: %lx, len: %d\n\0" as *const u8, buffer, length);};
 
     // eth_mdelay(50);
-    eth_mdelay(1);
+    eth_mdelay(10);
     return 0;
 }
 
@@ -207,6 +210,9 @@ pub fn eth_rx(gmacdev: &mut net_device) -> Option<Vec<Vec<u8>>> {
     let mut length: u32 = 0;
     let mut desc_idx: u32 = gmacdev.rx_currdescnum;
     let mut rxdesc: DmaDesc = unsafe { gmacdev.rx_desc[desc_idx as usize].read() } as DmaDesc;
+
+    // unsafe {eth_printf(b"gmac recv packet: desc_idx: %lx, addr: %lx\n\0" as *const u8, desc_idx, gmacdev.rx_desc[desc_idx as usize]);};
+    // unsafe {eth_printf(b"gmac recv packet:   status: %lx, addr: %lx\n\0" as *const u8, rxdesc.txrx_status, rxdesc.dmamac_addr);};
 
     if rxdesc.txrx_status & (1 << 31) != 0 {
         return None;
@@ -223,6 +229,7 @@ pub fn eth_rx(gmacdev: &mut net_device) -> Option<Vec<Vec<u8>>> {
     recv_packets.push(mbuf.to_vec());
 
     rxdesc.txrx_status |= (1 << 31);
+
     unsafe {
         gmacdev.rx_desc[desc_idx as usize].write(rxdesc);
     }
@@ -363,19 +370,6 @@ pub fn eth_init(gmacdev: &mut net_device) -> i32 {
     eth_mac_write_reg(gmacdev.mac_base, GmacConfig, set_data);
 
     unsafe { eth_sync_dcache() };
-
-    // eth_gmac_disable_mmc_irq(gmacdev);
-    // eth_dma_clear_curr_irq(gmacdev);
-
-    // eth_dma_enable_interrupt(gmacdev, DmaIntEnable);
-    // eth_dma_enable_interrupt(gmacdev, DmaIntDisable);
-
-    // eth_gmac_enable_rx(gmacdev);
-    // eth_gmac_enable_tx(gmacdev);
-    // eth_dma_enable_rx(gmacdev);
-    // eth_dma_enable_tx(gmacdev);
-
-    // unsafe { eth_isr_install() };
 
     eth_phy_rgsmii_check(gmacdev);
 

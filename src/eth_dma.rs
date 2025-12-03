@@ -309,18 +309,22 @@ pub fn eth_setup_tx_desc_queue(gmacdev: &mut net_device, desc_num: u32) {
         gmacdev.tx_buffer[i as usize] = buffer;
 
         unsafe {
+            (*desc).txrx_status = 0;
             (*desc).dmamac_addr = dma_addr;
-            (*desc).dmamac_next = unsafe {eth_virt_to_phys(desc.offset(1) as u64)};;
+            (*desc).dmamac_next = unsafe {eth_virt_to_phys(desc.offset(1) as u64)};
             (*desc).txrx_status &= !((1 << 30) | (1 << 29) | (1 << 28) | (1 << 27)
                                      | (3 << 22) | (1 << 21) | (1 << 26));
             (*desc).txrx_status |= (1 << 20);
             (*desc).dmamac_cntl = 0;
             (*desc).txrx_status &= !((0x1FFFF << 0) | (1 << 31));
+            // unsafe {eth_printf(b"tx desc dmamac status: %x, %lx\n\0" as *const u8, (*desc).txrx_status, (*desc).dmamac_addr);}
+            // unsafe {eth_printf(b"tx desc dmamac   addr: %lx\n\0" as *const u8, desc);}
+            if i == (desc_num-1) {
+                (*desc).dmamac_next = unsafe { eth_virt_to_phys(first_desc as u64) };
+                // unsafe {eth_printf(b"tx desc dmamac_next: %lx, %lx <-->\n\n\0" as *const u8, desc as u64, (*desc).dmamac_next);}
+            }
             desc = desc.offset(1);
         }
-    }
-    unsafe {
-        (*desc).dmamac_next = unsafe { eth_virt_to_phys(first_desc as u64) };
     }
 }
 
@@ -351,11 +355,14 @@ pub fn eth_setup_rx_desc_queue(gmacdev: &mut net_device, desc_num: u32) {
             (*desc).dmamac_next = unsafe {eth_virt_to_phys(desc.offset(1) as u64)};
             (*desc).dmamac_cntl = (1600 & (0x1FFF << 0)) | (1 << 14);
             (*desc).txrx_status = (1 << 31);
+            // unsafe {eth_printf(b"rx desc dmamac status: %x, %lx\n\0" as *const u8, (*desc).txrx_status, (*desc).dmamac_addr);}
+            // unsafe {eth_printf(b"rx desc dmamac   addr: %lx\n\0" as *const u8, desc);}
+            if i == (desc_num-1) {
+                (*desc).dmamac_next = unsafe { eth_virt_to_phys(first_desc as u64) };
+                // unsafe {eth_printf(b"rx desc dmamac_next: %lx, %lx <-->\n\n\0" as *const u8, desc as u64, (*desc).dmamac_next);}
+            }
             desc = desc.offset(1);
         }
-    }
-    unsafe {
-        (*desc).dmamac_next = unsafe { eth_virt_to_phys(first_desc as u64) };
     }
 }
 
