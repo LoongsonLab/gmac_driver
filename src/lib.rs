@@ -3,12 +3,11 @@
 
 extern crate alloc;
 
-mod drv_eth;
-mod eth_const;
-mod eth_dma;
+mod gmac;
+mod gmac_const;
+mod gmac_dma;
 mod platform;
 
-pub use drv_eth::*;
-pub use eth_const::*;
-pub use drv_eth::*;
+pub use gmac::*;
+pub use gmac_const::*;
 

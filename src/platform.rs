@@ -2,25 +2,8 @@ use core::{alloc::Layout, arch::asm};
 
 use alloc::alloc::alloc;
 
-use crate::eth_const::*;
+use crate::gmac_const::*;
 use crate::net_device;
-
-/*
-// for C test
-unsafe extern "C" {
-    pub fn eth_printf(fmt: *const u8, _: ...) -> i32;
-    pub fn eth_sync_dcache();
-    pub fn eth_virt_to_phys(va: u64) -> u32;
-    pub fn eth_phys_to_virt(pa: u32) -> u64;
-    pub fn eth_malloc_align(size: u64, align: u32) -> u64;
-    pub fn eth_handle_tx_buffer(p: u64, buffer: u64) -> u32;
-    pub fn eth_handle_rx_buffer(buffer: u64, length: u32) -> u64;
-    pub fn eth_rx_ready(gmacdev: *mut net_device);
-    pub fn eth_update_linkstate(gmacdev: *mut net_device, status: u32);
-    pub fn eth_isr_install();
-}
-*/
-
 
 unsafe extern "C" {
     pub safe fn eth_printf(fmt: *const u8, _: ...) -> i32;
@@ -38,6 +21,7 @@ unsafe extern "C" {
 
     pub safe fn eth_handle_rx_buffer(buffer: u64, length: u32) -> u64;
     pub safe fn eth_handle_tx_buffer(p: u64, buffer: u64, len: u64) -> u32;
+    pub safe fn eth_isr_install();
 }
 
 pub fn eth_malloc_align(size: u64, align: u32) -> u64 {
@@ -57,7 +41,7 @@ pub fn eth_rx_ready(gmacdev: *mut net_device) {}
 
 // 中断isr通知链路状态发生变化，status - 1表示up，0表示down
 // 链路目前仅支持1000Mbps duplex
-pub fn eth_update_linkstate(gmacdev: *mut net_device, status: u32) {}
+pub fn eth_update_linkstate(gmacdev: *mut net_device, _status: u32) {}
 
 // OS注册中断，中断号为12
-pub fn eth_isr_install() {}
+
